@@ -331,6 +331,7 @@ if __name__ == "__main__":
     # =========================================================================
     R_DUST_A1 = 0.15e-6    # 300 nm diameter monodisperse (as in Fig. 2 of Wang+2014)
     DELTAT = 1800.0         # timestep [s]  (30 min, CAM5 default)
+    DELTAT_CFDC = 10.0      # CFDC residence time [s] (~5-20 s)
     AW = 1.0                # water activity (1.0 = no solute effect)
 
     # Single-alpha parameters (Table 1: dust immersion, DeMott et al. 2011)
@@ -347,6 +348,8 @@ if __name__ == "__main__":
 
     ff_single = np.zeros_like(t_range)
     ff_pdf = np.zeros_like(t_range)
+    ff_single_10s = np.zeros_like(t_range)
+    ff_pdf_10s = np.zeros_like(t_range)
 
     for i, t in enumerate(t_range):
         ff_single[i] = compute_ff_single(
@@ -354,6 +357,12 @@ if __name__ == "__main__":
         )
         ff_pdf[i] = compute_ff_pdf(
             t, DELTAT, r_dust=R_DUST_A1, mu_deg=MU_PDF_DEG, sigma=SIGMA_PDF, aw=AW,
+        )
+        ff_single_10s[i] = compute_ff_single(
+            t, DELTAT_CFDC, r_dust=R_DUST_A1, alpha_deg=ALPHA_SINGLE_DEG, aw=AW,
+        )
+        ff_pdf_10s[i] = compute_ff_pdf(
+            t, DELTAT_CFDC, r_dust=R_DUST_A1, mu_deg=MU_PDF_DEG, sigma=SIGMA_PDF, aw=AW,
         )
 
     # --- Print summary at a few temperatures ---
@@ -376,15 +385,26 @@ if __name__ == "__main__":
     # Replace zeros with NaN for clean log plotting
     ff_single_plot = np.where(ff_single > 0, ff_single, np.nan)
     ff_pdf_plot = np.where(ff_pdf > 0, ff_pdf, np.nan)
+    ff_single_10s_plot = np.where(ff_single_10s > 0, ff_single_10s, np.nan)
+    ff_pdf_10s_plot = np.where(ff_pdf_10s > 0, ff_pdf_10s, np.nan)
 
-    ax.semilogy(tc_range, ff_single_plot, "r-", linewidth=2, label=f"single-$\\alpha$ ($\\alpha$={ALPHA_SINGLE_DEG})")
-    ax.semilogy(tc_range, ff_pdf_plot, "b--", linewidth=2, label=f"$\\alpha$-PDF ($\\mu$={MU_PDF_DEG}, $\\sigma$={SIGMA_PDF})")
+    # dt = 1800 s curves (CAM5 default)
+    ax.semilogy(tc_range, ff_single_plot, "r-", linewidth=2,
+                label=f"single-$\\alpha$ ($\\alpha$={ALPHA_SINGLE_DEG}, dt={DELTAT:.0f}s)")
+    ax.semilogy(tc_range, ff_pdf_plot, "b--", linewidth=2,
+                label=f"$\\alpha$-PDF ($\\mu$={MU_PDF_DEG}, $\\sigma$={SIGMA_PDF}, dt={DELTAT:.0f}s)")
+
+    # dt = 10 s curves (CFDC residence time)
+    ax.semilogy(tc_range, ff_single_10s_plot, "r-", linewidth=1.5, alpha=0.5,
+                label=f"single-$\\alpha$ (dt={DELTAT_CFDC:.0f}s)")
+    ax.semilogy(tc_range, ff_pdf_10s_plot, "b--", linewidth=1.5, alpha=0.5,
+                label=f"$\\alpha$-PDF (dt={DELTAT_CFDC:.0f}s)")
 
     ax.set_xlabel("Temperature [C]", fontsize=13)
     ax.set_ylabel("Active Fraction", fontsize=13)
     ax.set_title(
         f"Wang et al. (2014) -- Immersion freezing of dust\n"
-        f"$r_N$ = {R_DUST_A1*1e9:.0f} nm, $\\Delta t$ = {DELTAT:.0f} s",
+        f"$r_N$ = {R_DUST_A1*1e9:.0f} nm",
         fontsize=13,
     )
     ax.set_xlim(-40, 0)
