@@ -1,0 +1,5 @@
+- **Commit**: c27adfe — 🐛 fix: re-digitize Wang et al. (2014) Figure 1 with corrected values (#6)
+- **What was done**: Carefully re-digitized all 6 series from Wang et al. (2014) Figure 1. Created `digitize_wang_fig1.py` extraction script with annotated values. Regenerated `fig_1_wang_ff_vs_t.csv` with corrected data.
+- **Current state**: CSV is corrected. The boxmodel script (`boxmodel_Jimm_dust_a1.py`) still uses the old CSV data and its plot (`ff_single_vs_pdf.png`) will be stale until regenerated.
+- **Next steps**: Re-run `boxmodel_Jimm_dust_a1.py` to regenerate `ff_single_vs_pdf.png` with the corrected Wang data overlay. Verify the model output still makes physical sense against the corrected observations.
+- **Key decisions**: Removed 3 barely-visible ZINC106 obs at warm temperatures (T=-25,-22,-15) that were at ~1e-5 to 1e-6 — too faint to read reliably from the figure. These could be re-added if a higher-resolution version of the figure is available.
