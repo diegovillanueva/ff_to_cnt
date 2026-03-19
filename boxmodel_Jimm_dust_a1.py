@@ -161,8 +161,8 @@ def compute_thermo(
 
 def compute_ff_single(
     t: float,
-    r_dust: float,
     deltat: float,
+    r_dust: float = 0.15e-6,
     alpha_deg: float = THETA_IMM_DUST,
     aw: float = 1.0,
 ) -> float:
@@ -171,22 +171,23 @@ def compute_ff_single(
     ff_single = 1 - exp(-J_imm(T, alpha) * dt)
     Matches the .not. pdf_imm_in branch of the original Fortran.
     """
-    supersatice = svp_water_goff_gratch(t) / svp_ice_goff_gratch(t)
-    thermo = compute_thermo(t, supersatice, aw=aw)
-    if not thermo["do_dst1"]:
+    result = compute_Jimm_dust_a1(t, r_dust_a1=r_dust, aw_dst1=aw)
+    if not result["do_dst1"]:
         return 0.0
 
-    alpha_rad = alpha_deg / 180.0 * PI
-    m = np.cos(alpha_rad)
-    f = (2 + m) * (1 - m) ** 2 / 4.0
+    # alpha_rad = alpha_deg / 180.0 * PI
+    # m = np.cos(alpha_rad)
+    # f = (2 + m) * (1 - m) ** 2 / 4.0
+    #
+    # J = (
+    #     thermo["A_prime"]
+    #     * r_dust**2
+    #     / np.sqrt(f)
+    #     * np.exp((-DGA_IMM_DUST - f * thermo["dg0"]) / (KBOLTZ * t))
+    # )
+    # J = max(J, 0.0)
 
-    J = (
-        thermo["A_prime"]
-        * r_dust**2
-        / np.sqrt(f)
-        * np.exp((-DGA_IMM_DUST - f * thermo["dg0"]) / (KBOLTZ * t))
-    )
-    J = max(J, 0.0)
+    J = result["Jimm_at_pdf_peak [s-1]"]
 
     if t > 263.15:
         return 0.0
@@ -195,8 +196,8 @@ def compute_ff_single(
 
 def compute_ff_pdf(
     t: float,
-    r_dust: float,
     deltat: float,
+    r_dust: float = 0.15e-6,
     mu_deg: float = THETA_IMM_DUST,
     sigma: float = IMM_DUST_VAR_THETA,
     aw: float = 1.0,
@@ -206,23 +207,24 @@ def compute_ff_pdf(
     ff_pdf = 1 - integral p(alpha) * exp(-J_imm(T,alpha)*dt) d_alpha
     Matches the pdf_imm_in branch of the original Fortran.
     """
-    supersatice = svp_water_goff_gratch(t) / svp_ice_goff_gratch(t)
-    thermo = compute_thermo(t, supersatice, aw=aw)
-    if not thermo["do_dst1"]:
+    result = compute_Jimm_dust_a1(t, r_dust_a1=r_dust, aw_dst1=aw)
+    if not result["do_dst1"]:
         return 0.0
 
-    dim_theta, pdf_imm_theta, dim_f, pdf_d_theta = init_pdf_theta()
+    dim_Jimm = result["dim_Jimm_dust_a1"]
+    pdf_imm_theta = result["pdf_imm_theta"]
+    pdf_d_theta = result["pdf_d_theta"]
 
-    # Compute J_imm at each theta bin
-    dim_Jimm = np.zeros(PDF_N_THETA)
-    for i in range(I1, I2 + 1):
-        dim_Jimm[i] = (
-            thermo["A_prime"]
-            * r_dust**2
-            / np.sqrt(dim_f[i])
-            * np.exp((-DGA_IMM_DUST - dim_f[i] * thermo["dg0"]) / (KBOLTZ * t))
-        )
-        dim_Jimm[i] = max(dim_Jimm[i], 0.0)
+    # # Compute J_imm at each theta bin
+    # dim_Jimm = np.zeros(PDF_N_THETA)
+    # for i in range(I1, I2 + 1):
+    #     dim_Jimm[i] = (
+    #         thermo["A_prime"]
+    #         * r_dust**2
+    #         / np.sqrt(dim_f[i])
+    #         * np.exp((-DGA_IMM_DUST - dim_f[i] * thermo["dg0"]) / (KBOLTZ * t))
+    #     )
+    #     dim_Jimm[i] = max(dim_Jimm[i], 0.0)
 
     # Trapezoidal integration of survival fraction
     survival = 0.0
@@ -243,7 +245,7 @@ def compute_ff_pdf(
 
 def compute_Jimm_dust_a1(
     t: float,
-    r_dust_a1: float,
+    r_dust_a1: float = 0.15e-6,
     aw_dst1: float = 1.0,
 ) -> dict:
     """Compute Jimm_dust_a1 nucleation rate for dust accumulation mode.
@@ -254,8 +256,8 @@ def compute_Jimm_dust_a1(
     ----------
     t : float
         Temperature [K]
-    r_dust_a1 : float
-        Mass-mean radius of dust accumulation mode [m]
+    r_dust_a1 : float, optional
+        Mass-mean radius of dust accumulation mode [m]. Default 0.15e-6 (150 nm).
     aw_dst1 : float, optional
         Water activity for dust_a1 [ ]. Default 1.0.
     """
@@ -312,6 +314,9 @@ def compute_Jimm_dust_a1(
         "dg0imm_dust_a1": dg0imm_dust_a1,
         "Aimm_dust_a1": Aimm_dust_a1,
         "Jimm_at_pdf_peak [s-1]": Jimm_at_peak,
+        "dim_Jimm_dust_a1": dim_Jimm_dust_a1,
+        "pdf_imm_theta": pdf_imm_theta,
+        "pdf_d_theta": pdf_d_theta,
         "do_dst1": do_dst1,
     }
 
@@ -345,10 +350,10 @@ if __name__ == "__main__":
 
     for i, t in enumerate(t_range):
         ff_single[i] = compute_ff_single(
-            t, R_DUST_A1, DELTAT, alpha_deg=ALPHA_SINGLE_DEG, aw=AW,
+            t, DELTAT, r_dust=R_DUST_A1, alpha_deg=ALPHA_SINGLE_DEG, aw=AW,
         )
         ff_pdf[i] = compute_ff_pdf(
-            t, R_DUST_A1, DELTAT, mu_deg=MU_PDF_DEG, sigma=SIGMA_PDF, aw=AW,
+            t, DELTAT, r_dust=R_DUST_A1, mu_deg=MU_PDF_DEG, sigma=SIGMA_PDF, aw=AW,
         )
 
     # --- Print summary at a few temperatures ---
