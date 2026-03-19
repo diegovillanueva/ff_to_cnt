@@ -3,14 +3,24 @@
 Box model for Jimm_dust_a1: immersion freezing nucleation rate for fine dust (accumulation mode)
 from hetfrz_classnuc.F90 in CESM2/CAM.
 
-Uses the PDF-theta approach (pdf_imm_in = True) with classical nucleation theory.
+Implements both the single-alpha and alpha-PDF contact angle models from
+Wang et al. (2014, ACP), doi:10.5194/acp-14-10411-2014.
+
+  Eq. 1: J_het = A' * r_N^2 / sqrt(f) * exp((-dg# - f*dg0) / (kT))
+  Eq. 2: f = (2+m)(1-m)^2 / 4,  m = cos(alpha)
+  Eq. 3: p(alpha) = 1/(alpha*sigma*sqrt(2*pi)) * exp(-(ln(alpha)-ln(mu))^2/(2*sigma^2))
+  Eq. 4: ff_pdf = 1 - integral_0^pi p(alpha) * exp(-J_imm(T,alpha)*dt) d_alpha
+         ff_single = 1 - exp(-J_imm(T, alpha_0) * dt)
 
 All internal constants are hardcoded from the Fortran source.
 External inputs that the user must provide are clearly marked below.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.special import erf
 
 # =============================================================================
@@ -126,6 +136,160 @@ def init_pdf_theta() -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         dim_f_imm_dust_a1[i] = (2 + m) * (1 - m) ** 2 / 4.0
 
     return dim_theta, pdf_imm_theta, dim_f_imm_dust_a1, pdf_d_theta
+
+
+def compute_thermo(
+    t: float,
+    aw: float = 1.0,
+) -> dict:
+    """Compute thermodynamic properties needed for J_het (Eq. 1).
+
+    Factored out so both single-α and α-PDF models share the same calculation.
+    """
+    eswtr = svp_water_goff_gratch(t)
+    esice = svp_ice_goff_gratch(t)
+    supersatice = eswtr / esice
+
+    tc = t - TMELT
+
+    # Apparent temperature ramp
+    tc_apparent = tc
+    if tc >= TC_RAMP_TOP and tc <= TC_RAMP_BOT:
+        tc_apparent = TC_APPARENT_RAMP_TOP + (tc - TC_RAMP_TOP) * (
+            TC_APPARENT_RAMP_BOT - TC_APPARENT_RAMP_TOP
+        ) / (TC_RAMP_BOT - TC_RAMP_TOP)
+    tk_apparent = tc_apparent + TMELT
+
+    # Ramped supersaturation
+    supersatice_ramp = supersatice
+    if FRZ_ASSUME_RAMP_RHCE:
+        if tc_apparent >= -30.0 and tc_apparent <= -10.0:
+            supersatice_ramp = 1.34 + (tc_apparent - (-30.0)) * (1.10 - 1.34) / ((-10.0) - (-30.0))
+        elif tc_apparent < -30.0:
+            supersatice_ramp = 1.34
+        elif tc_apparent > -10.0:
+            supersatice_ramp = 1.10
+
+    # Ice properties
+    rhoice = 916.7 - 0.175 * tc_apparent - 5.0e-4 * tc_apparent**2
+    vwice = MWH2O * AMU / rhoice
+    sigma_iw = (28.5 + 0.25 * tc_apparent) * 1e-3  # [J/m2]
+
+    # Critical germ radius for immersion
+    do_dst1 = True
+    if DEPR_POINT_FRZ:
+        if aw * supersatice_ramp > 1.0:
+            rgimm = 2 * vwice * sigma_iw / (KBOLTZ * tk_apparent * np.log(aw * supersatice_ramp))
+        else:
+            do_dst1 = False
+            rgimm = 2 * vwice * sigma_iw / (KBOLTZ * tk_apparent * np.log(supersatice_ramp))
+    else:
+        rgimm = 2 * vwice * sigma_iw / (KBOLTZ * tk_apparent * np.log(supersatice_ramp))
+
+    # Homogeneous energy of germ formation
+    dg0 = 4 * PI / 3.0 * sigma_iw * rgimm**2
+
+    # Prefactor A' (Eq. 1)
+    A_prime = N1 * (
+        (vwice * RHPLANCK) / (rgimm**3)
+        * np.sqrt(3.0 / PI * KBOLTZ * tk_apparent * dg0)
+    )
+
+    return {
+        "tc": tc,
+        "tk_apparent": tk_apparent,
+        "supersatice": supersatice,
+        "do_dst1": do_dst1,
+        "rgimm": rgimm,
+        "dg0": dg0,
+        "A_prime": A_prime,
+    }
+
+
+def compute_Jimm_at_alpha(
+    alpha_rad: float,
+    A_prime: float,
+    r_dust: float,
+    dg0: float,
+    tk_apparent: float,
+) -> float:
+    """Compute J_imm for a single contact angle (Eq. 1 + Eq. 2).
+
+    J_het = A' * r_N^2 / sqrt(f) * exp((-dg# - f*dg0) / (kT))
+    f = (2+m)(1-m)^2 / 4,  m = cos(alpha)
+    """
+    m = np.cos(alpha_rad)
+    f = (2 + m) * (1 - m) ** 2 / 4.0  # Eq. 2
+    J = (
+        A_prime
+        * r_dust**2
+        / np.sqrt(f)
+        * np.exp((-DGA_IMM_DUST - f * dg0) / (KBOLTZ * tk_apparent))
+    )
+    return max(J, 0.0)
+
+
+def compute_ff_single(
+    t: float,
+    r_dust: float,
+    deltat: float,
+    alpha_deg: float = THETA_IMM_DUST,
+    aw: float = 1.0,
+) -> float:
+    """Frozen fraction using a single contact angle (Eq. 4 with p(α)=δ(α-α₀)).
+
+    ff_single = 1 - exp(-J_imm(T, alpha) * dt)
+    """
+    thermo = compute_thermo(t, aw=aw)
+    if not thermo["do_dst1"]:
+        return 0.0
+    alpha_rad = alpha_deg / 180.0 * PI
+    J = compute_Jimm_at_alpha(
+        alpha_rad, thermo["A_prime"], r_dust, thermo["dg0"], thermo["tk_apparent"]
+    )
+    return 1.0 - np.exp(-J * deltat)
+
+
+def compute_ff_pdf(
+    t: float,
+    r_dust: float,
+    deltat: float,
+    mu_deg: float = THETA_IMM_DUST,
+    sigma: float = IMM_DUST_VAR_THETA,
+    aw: float = 1.0,
+) -> float:
+    """Frozen fraction using the α-PDF model (Eq. 3 + Eq. 4).
+
+    ff_pdf = 1 - integral_0^pi p(alpha) * exp(-J_imm(T,alpha)*dt) d_alpha
+    """
+    thermo = compute_thermo(t, aw=aw)
+    if not thermo["do_dst1"]:
+        return 0.0
+
+    dim_theta, pdf_imm_theta, dim_f, pdf_d_theta = init_pdf_theta()
+
+    # Compute J_imm at each theta bin (Eq. 1)
+    dim_Jimm = np.zeros(PDF_N_THETA)
+    for i in range(I1, I2 + 1):
+        dim_Jimm[i] = (
+            thermo["A_prime"]
+            * r_dust**2
+            / np.sqrt(dim_f[i])
+            * np.exp((-DGA_IMM_DUST - dim_f[i] * thermo["dg0"]) / (KBOLTZ * thermo["tk_apparent"]))
+        )
+        dim_Jimm[i] = max(dim_Jimm[i], 0.0)
+
+    # Trapezoidal integration of survival fraction (Eq. 4)
+    # NOTE: no 0.99 clamping here — that's a CESM Fortran numerical hack,
+    # not in the paper's Eq. 4. It kills the α-PDF signal at warm T.
+    survival = 0.0
+    for i in range(I1, I2):
+        survival += 0.5 * (
+            pdf_imm_theta[i] * np.exp(-dim_Jimm[i] * deltat)
+            + pdf_imm_theta[i + 1] * np.exp(-dim_Jimm[i + 1] * deltat)
+        ) * pdf_d_theta
+
+    return max(0.0, 1.0 - survival)
 
 
 def compute_Jimm_dust_a1(
@@ -290,48 +454,120 @@ def compute_Jimm_dust_a1(
 
 
 # =============================================================================
-# EXAMPLE: single-point, single-timestep calculation
+# Temperature sweep: compare single-alpha vs alpha-PDF frozen fractions
 # =============================================================================
 if __name__ == "__main__":
 
     # =========================================================================
     # >>> EXTERNAL INPUTS — CHANGE THESE FOR YOUR CASE <<<
     # =========================================================================
-    T = 253.15              # Temperature [K]  (-20 C)
-    P = 50000.0             # Pressure [Pa]  (~500 hPa, mid-troposphere)
-    # Ice supersaturation: eswtr/esice at this T (computed internally if not known)
-    SUPERSATICE = svp_water_goff_gratch(T) / svp_ice_goff_gratch(T)
-    R_DUST_A1 = 0.5e-6     # dust_a1 mass-mean radius [m]
-    CLOUDBORNE_DST1 = 1.0   # cloudborne dust_a1 number [#/cm3]
-    DELTAT = 1800.0         # timestep [s]  (30 min)
+    R_DUST_A1 = 0.15e-6    # 300 nm diameter monodisperse (as in Fig. 2 of Wang+2014)
+    DELTAT = 1800.0         # timestep [s]  (30 min, CAM5 default)
     AW = 1.0                # water activity (1.0 = no solute effect)
-    ICNLX = 100.0           # in-cloud droplet concentration [cm-3]
+
+    # Single-alpha parameters (Table 1: dust immersion, DeMott et al. 2011)
+    ALPHA_SINGLE_DEG = 46.0  # contact angle [deg]
+
+    # Alpha-PDF parameters (Table 2: CSU106)
+    MU_PDF_DEG = 46.0        # mean contact angle [deg]
+    SIGMA_PDF = 0.01         # standard deviation of log-normal
     # =========================================================================
 
-    results = compute_Jimm_dust_a1(
-        t=T,
-        p=P,
-        supersatice=SUPERSATICE,
-        r_dust_a1=R_DUST_A1,
-        total_cloudborne_dust_a1=CLOUDBORNE_DST1,
-        deltat=DELTAT,
-        aw_dst1=AW,
-        icnlx=ICNLX,
-    )
+    # Temperature range (matching paper Fig. 1 / Fig. 2)
+    tc_range = np.linspace(-40.0, 0.0, 200)
+    t_range = tc_range + TMELT
 
-    print("=" * 65)
-    print("  Box model: Jimm_dust_a1  (immersion freezing, PDF-theta)")
-    print("=" * 65)
-    print(f"  Input T = {T:.2f} K  ({T - TMELT:.2f} C)")
-    print(f"  Input P = {P:.0f} Pa")
-    print(f"  Input Si = {SUPERSATICE:.4f}")
-    print(f"  Input r_dust_a1 = {R_DUST_A1:.2e} m")
-    print(f"  Input N_cloudborne = {CLOUDBORNE_DST1:.2f} #/cm3")
-    print(f"  Input dt = {DELTAT:.0f} s")
-    print("-" * 65)
-    for k, v in results.items():
-        if isinstance(v, float):
-            print(f"  {k:45s} = {v:.6e}")
-        else:
-            print(f"  {k:45s} = {v}")
-    print("=" * 65)
+    ff_single = np.zeros_like(t_range)
+    ff_pdf = np.zeros_like(t_range)
+
+    for i, t in enumerate(t_range):
+        ff_single[i] = compute_ff_single(
+            t, R_DUST_A1, DELTAT, alpha_deg=ALPHA_SINGLE_DEG, aw=AW,
+        )
+        ff_pdf[i] = compute_ff_pdf(
+            t, R_DUST_A1, DELTAT, mu_deg=MU_PDF_DEG, sigma=SIGMA_PDF, aw=AW,
+        )
+
+    # --- Print summary at a few temperatures ---
+    print("=" * 70)
+    print("  Frozen fraction comparison: single-alpha vs alpha-PDF")
+    print(f"  r_dust = {R_DUST_A1*1e6:.3f} um, dt = {DELTAT:.0f} s")
+    print(f"  single-alpha: alpha = {ALPHA_SINGLE_DEG}°")
+    print(f"  alpha-PDF: mu = {MU_PDF_DEG}°, sigma = {SIGMA_PDF}")
+    print("=" * 70)
+    print(f"  {'T [°C]':>8s}  {'ff_single':>12s}  {'ff_pdf':>12s}")
+    print("-" * 70)
+    for tc_val in [-35, -30, -25, -20, -15, -10]:
+        idx = np.argmin(np.abs(tc_range - tc_val))
+        print(f"  {tc_range[idx]:8.1f}  {ff_single[idx]:12.4e}  {ff_pdf[idx]:12.4e}")
+    print("=" * 70)
+
+    # --- Load digitized Wang et al. (2014) Fig. 1 data ---
+    csv_path = Path(__file__).parent / "fig_1_wang_ff_vs_t.csv"
+    wang_data = {}
+    if csv_path.exists():
+        import csv
+
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            for col in reader.fieldnames:
+                wang_data[col] = []
+            for row in reader:
+                for col in reader.fieldnames:
+                    val = row[col].strip() if row[col] else ""
+                    wang_data[col].append(float(val) if val else np.nan)
+        for col in wang_data:
+            wang_data[col] = np.array(wang_data[col])
+        print(f"  Loaded {csv_path.name} with {len(wang_data['temperature_C'])} points")
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # Replace zeros with NaN for clean log plotting
+    ff_single_plot = np.where(ff_single > 0, ff_single, np.nan)
+    ff_pdf_plot = np.where(ff_pdf > 0, ff_pdf, np.nan)
+
+    # Our model curves
+    ax.semilogy(tc_range, ff_single_plot, "r-", linewidth=2, label=f"single-$\\alpha$ ($\\alpha$={ALPHA_SINGLE_DEG}°)")
+    ax.semilogy(tc_range, ff_pdf_plot, "b--", linewidth=2, label=f"$\\alpha$-PDF ($\\mu$={MU_PDF_DEG}°, $\\sigma$={SIGMA_PDF})")
+
+    # Wang et al. (2014) Fig. 1 digitized data
+    if wang_data:
+        tc_wang = wang_data["temperature_C"]
+
+        # CSU106 observations
+        mask = ~np.isnan(wang_data["CSU106_obs"])
+        if mask.any():
+            ax.semilogy(tc_wang[mask], wang_data["CSU106_obs"][mask], "ro", ms=7, mfc="none", label="CSU106 Obs (Wang+2014)")
+
+        # ZINC106 observations
+        mask = ~np.isnan(wang_data["ZINC106_obs"])
+        if mask.any():
+            ax.semilogy(tc_wang[mask], wang_data["ZINC106_obs"][mask], "bs", ms=7, mfc="none", label="ZINC106 Obs (Wang+2014)")
+
+        # CSU106 alpha-PDF (paper's fit)
+        mask = ~np.isnan(wang_data["CSU106_alpha_PDF"])
+        if mask.any():
+            ax.semilogy(tc_wang[mask], wang_data["CSU106_alpha_PDF"][mask], "r:", linewidth=1.5, alpha=0.6, label="CSU106 $\\alpha$-PDF (Wang+2014)")
+
+        # CSU106 single-alpha (paper's fit)
+        mask = ~np.isnan(wang_data["CSU106_single_alpha"])
+        if mask.any():
+            ax.semilogy(tc_wang[mask], wang_data["CSU106_single_alpha"][mask], "r-.", linewidth=1.5, alpha=0.6, label="CSU106 single-$\\alpha$ (Wang+2014)")
+
+    ax.set_xlabel("Temperature [°C]", fontsize=13)
+    ax.set_ylabel("Active Fraction", fontsize=13)
+    ax.set_title(
+        f"Wang et al. (2014) — Immersion freezing of dust\n"
+        f"$r_N$ = {R_DUST_A1*1e9:.0f} nm, $\\Delta t$ = {DELTAT:.0f} s",
+        fontsize=13,
+    )
+    ax.set_xlim(-40, 0)
+    ax.set_ylim(1e-7, 1e-1)
+    ax.legend(fontsize=10, loc="lower left")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.tick_params(labelsize=11)
+    fig.tight_layout()
+    outpath = Path(__file__).parent / "ff_single_vs_pdf.png"
+    fig.savefig(outpath, dpi=150)
+    print(f"\nPlot saved to {outpath}")
