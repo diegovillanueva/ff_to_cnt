@@ -401,24 +401,6 @@ if __name__ == "__main__":
         print(f"  {tc_range[idx]:8.1f}  {ff_single[idx]:12.4e}  {ff_pdf[idx]:12.4e}")
     print("=" * 70)
 
-    # --- Load digitized Wang et al. (2014) Fig. 1 data ---
-    csv_path = Path(__file__).parent / "fig_1_wang_ff_vs_t.csv"
-    wang_data = {}
-    if csv_path.exists():
-        import csv
-
-        with open(csv_path) as f:
-            reader = csv.DictReader(f)
-            for col in reader.fieldnames:
-                wang_data[col] = []
-            for row in reader:
-                for col in reader.fieldnames:
-                    val = row[col].strip() if row[col] else ""
-                    wang_data[col].append(float(val) if val else np.nan)
-        for col in wang_data:
-            wang_data[col] = np.array(wang_data[col])
-        print(f"  Loaded {csv_path.name} with {len(wang_data['temperature_C'])} points")
-
     # --- Plot ---
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -426,33 +408,8 @@ if __name__ == "__main__":
     ff_single_plot = np.where(ff_single > 0, ff_single, np.nan)
     ff_pdf_plot = np.where(ff_pdf > 0, ff_pdf, np.nan)
 
-    # Our model curves
     ax.semilogy(tc_range, ff_single_plot, "r-", linewidth=2, label=f"single-$\\alpha$ ($\\alpha$={ALPHA_SINGLE_DEG})")
     ax.semilogy(tc_range, ff_pdf_plot, "b--", linewidth=2, label=f"$\\alpha$-PDF ($\\mu$={MU_PDF_DEG}, $\\sigma$={SIGMA_PDF})")
-
-    # Wang et al. (2014) Fig. 1 digitized data
-    if wang_data:
-        tc_wang = wang_data["temperature_C"]
-
-        # CSU106 observations
-        mask = ~np.isnan(wang_data["CSU106_obs"])
-        if mask.any():
-            ax.semilogy(tc_wang[mask], wang_data["CSU106_obs"][mask], "ro", ms=7, mfc="none", label="CSU106 Obs (Wang+2014)")
-
-        # ZINC106 observations
-        mask = ~np.isnan(wang_data["ZINC106_obs"])
-        if mask.any():
-            ax.semilogy(tc_wang[mask], wang_data["ZINC106_obs"][mask], "bs", ms=7, mfc="none", label="ZINC106 Obs (Wang+2014)")
-
-        # CSU106 alpha-PDF (paper's fit)
-        mask = ~np.isnan(wang_data["CSU106_alpha_PDF"])
-        if mask.any():
-            ax.semilogy(tc_wang[mask], wang_data["CSU106_alpha_PDF"][mask], "r:", linewidth=1.5, alpha=0.6, label="CSU106 $\\alpha$-PDF (Wang+2014)")
-
-        # CSU106 single-alpha (paper's fit)
-        mask = ~np.isnan(wang_data["CSU106_single_alpha"])
-        if mask.any():
-            ax.semilogy(tc_wang[mask], wang_data["CSU106_single_alpha"][mask], "r-.", linewidth=1.5, alpha=0.6, label="CSU106 single-$\\alpha$ (Wang+2014)")
 
     ax.set_xlabel("Temperature [C]", fontsize=13)
     ax.set_ylabel("Active Fraction", fontsize=13)
