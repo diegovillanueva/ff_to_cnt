@@ -243,33 +243,23 @@ def compute_ff_pdf(
 
 def compute_Jimm_dust_a1(
     t: float,
-    supersatice: float,
     r_dust_a1: float,
-    total_cloudborne_dust_a1: float,
-    deltat: float,
     aw_dst1: float = 1.0,
 ) -> dict:
-    """Compute Jimm_dust_a1 and the resulting frzduimm contribution from dust_a1.
+    """Compute Jimm_dust_a1 nucleation rate for dust accumulation mode.
 
-    Matches hetfrz_classnuc_calc from commit a156735c exactly.
-    No apparent-temperature ramp, no supersatice ramp, no background dust/drops.
+    Matches hetfrz_classnuc_calc from commit a156735c.
 
     Parameters (EXTERNAL INPUTS):
     ----------
     t : float
         Temperature [K]
-    supersatice : float
-        Ice supersaturation ratio at 100% RH over water [ ]
-        = eswtr / esice
     r_dust_a1 : float
         Mass-mean radius of dust accumulation mode [m]
-    total_cloudborne_dust_a1 : float
-        Cloudborne dust_a1 number concentration [#/cm3]
-    deltat : float
-        Model timestep [s]
     aw_dst1 : float, optional
         Water activity for dust_a1 [ ]. Default 1.0.
     """
+    supersatice = svp_water_goff_gratch(t) / svp_ice_goff_gratch(t)
     tc = t - TMELT
     rhoice = 916.7 - 0.175 * tc - 5.0e-4 * tc**2
     vwice = MWH2O * AMU / rhoice
@@ -295,7 +285,7 @@ def compute_Jimm_dust_a1(
         * np.sqrt(3.0 / PI * KBOLTZ * t * dg0imm_dust_a1)
     )
 
-    # PDF-theta integration (pdf_imm_in = True)
+    # PDF-theta: compute J at each theta bin
     dim_theta, pdf_imm_theta, dim_f, pdf_d_theta = init_pdf_theta()
 
     dim_Jimm_dust_a1 = np.zeros(PDF_N_THETA)
@@ -307,29 +297,6 @@ def compute_Jimm_dust_a1(
             * np.exp((-DGA_IMM_DUST - dim_f[i] * dg0imm_dust_a1) / (KBOLTZ * t))
         )
         dim_Jimm_dust_a1[i] = max(dim_Jimm_dust_a1[i], 0.0)
-
-    # Integrate PDF: survival fraction (trapezoidal rule)
-    sum_imm_dust_a1 = 0.0
-    for i in range(I1, I2):
-        sum_imm_dust_a1 += 0.5 * (
-            pdf_imm_theta[i] * np.exp(-dim_Jimm_dust_a1[i] * deltat)
-            + pdf_imm_theta[i + 1] * np.exp(-dim_Jimm_dust_a1[i + 1] * deltat)
-        ) * pdf_d_theta
-
-    if sum_imm_dust_a1 > 0.99:
-        sum_imm_dust_a1 = 1.0
-
-    frozen_fraction = 1.0 - sum_imm_dust_a1
-
-    # Freezing rate [#/cm3/s] — matches original Fortran:
-    # MIN(1*total_cloudborne/deltat, total_cloudborne/deltat*(1-sum))
-    if do_dst1 and t <= 263.15:
-        frzduimm_a1 = min(
-            total_cloudborne_dust_a1 / deltat,
-            total_cloudborne_dust_a1 / deltat * frozen_fraction,
-        )
-    else:
-        frzduimm_a1 = 0.0
 
     # Peak Jimm at PDF mean for reporting
     mean_theta_rad = THETA_IMM_DUST / 180.0 * PI
@@ -344,11 +311,8 @@ def compute_Jimm_dust_a1(
         "rgimm_dust_a1": rgimm_dust_a1,
         "dg0imm_dust_a1": dg0imm_dust_a1,
         "Aimm_dust_a1": Aimm_dust_a1,
-        "sum_imm_dust_a1 (survival fraction)": sum_imm_dust_a1,
-        "frozen_fraction (1 - survival)": frozen_fraction,
         "Jimm_at_pdf_peak [s-1]": Jimm_at_peak,
         "do_dst1": do_dst1,
-        "frzduimm_dust_a1 [#/cm3/s]": frzduimm_a1,
     }
 
 
